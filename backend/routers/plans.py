@@ -2,35 +2,39 @@
 
 import uuid
 import json
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, Header
 from ..database import query, mutate
 from ..models import SpaceCreate, SpaceResponse, PlanResponse, ShoppingItemResponse
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
 
-def _get_user(authorization: str) -> dict:
-    """Extract user from auth header (simple token for now)."""
-    from .auth import get_current_user
+def get_current_user(authorization: str = Header(...)) -> dict:
+    """Extract user from Bearer token in Authorization header."""
+    from .auth import get_current_user as _auth_user
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authorization")
-    return get_current_user(authorization.split(" ", 1)[1])
+    return _auth_user(authorization.split(" ", 1)[1])
 
 
 @router.post("/spaces", response_model=SpaceResponse)
 def create_space(
-    title: str = Form(...),
-    description: str = Form(""),
-    dimensions: str = Form(""),
-    authorization: str = "",
+    title: str = "Untitled Space",
+    description: str = "",
+    dimensions: str = "",
+    user: dict = Depends(get_current_user),
 ):
     """Create a new space entry."""
-    user = _get_user(authorization)
     space_id = str(uuid.uuid4())
+    
+    # Escape single quotes for SQL
+    title_safe = title.replace("'", "''")
+    desc_safe = description.replace("'", "''")
+    dim_safe = dimensions.replace("'", "''")
 
     mutate(
         f"INSERT INTO spaces (id, user_id, title, description, dimensions, status) "
-        f"VALUES ('{space_id}', '{user['id']}', '{title}', '{description}', '{dimensions}', 'pending')"
+        f"VALUES ('{space_id}', '{user['id']}', '{title_safe}', '{desc_safe}', '{dim_safe}', 'pending')"
     )
 
     row = query(f"SELECT * FROM spaces WHERE id = '{space_id}'")[0]
@@ -43,9 +47,8 @@ def create_space(
 
 
 @router.get("/spaces", response_model=list[SpaceResponse])
-def list_spaces(authorization: str = ""):
+def list_spaces(user: dict = Depends(get_current_user)):
     """List all spaces for the current user."""
-    user = _get_user(authorization)
     rows = query(f"SELECT * FROM spaces WHERE user_id = '{user['id']}' ORDER BY created_at DESC")
     return [
         SpaceResponse(
@@ -59,9 +62,8 @@ def list_spaces(authorization: str = ""):
 
 
 @router.get("/spaces/{space_id}", response_model=SpaceResponse)
-def get_space(space_id: str, authorization: str = ""):
+def get_space(space_id: str, user: dict = Depends(get_current_user)):
     """Get a specific space."""
-    user = _get_user(authorization)
     rows = query(f"SELECT * FROM spaces WHERE id = '{space_id}' AND user_id = '{user['id']}'")
     if not rows:
         raise HTTPException(status_code=404, detail="Space not found")
@@ -75,13 +77,12 @@ def get_space(space_id: str, authorization: str = ""):
 
 
 @router.post("/generate/{space_id}", response_model=PlanResponse)
-def generate_plan(space_id: str, authorization: str = ""):
+def generate_plan(space_id: str, user: dict = Depends(get_current_user)):
     """Generate an organization plan for a space.
     
     For the MVP, this creates a template plan. AI integration (via the AI Product Engineer)
     will replace the template with actual AI-generated content.
     """
-    user = _get_user(authorization)
     rows = query(f"SELECT * FROM spaces WHERE id = '{space_id}' AND user_id = '{user['id']}'")
     if not rows:
         raise HTTPException(status_code=404, detail="Space not found")
@@ -120,11 +121,14 @@ def generate_plan(space_id: str, authorization: str = ""):
     }
 
     plan_id = str(uuid.uuid4())
+    # Escape single quotes in JSON
+    plan_data_str = json.dumps(plan_data).replace("'", "''")
+    shopping_list_str = json.dumps(shopping_list).replace("'", "''")
+    
     mutate(
         f"INSERT INTO plans (id, space_id, user_id, plan_data, shopping_list, status) "
         f"VALUES ('{plan_id}', '{space_id}', '{user['id']}', "
-        f"'{json.dumps(plan_data).replace(chr(39), chr(39)+chr(39))}', "
-        f"'{json.dumps(shopping_list).replace(chr(39), chr(39)+chr(39))}', 'active')"
+        f"'{plan_data_str}', '{shopping_list_str}', 'active')"
     )
 
     # Update space status
@@ -134,7 +138,7 @@ def generate_plan(space_id: str, authorization: str = ""):
     mutate(
         f"INSERT INTO kpi_events (id, event_type, user_id, metadata) "
         f"VALUES ('{str(uuid.uuid4())}', 'plan_generated', '{user['id']}', "
-        f"'{json.dumps({'space_id': space_id})}')"
+        f"'{json.dumps({'space_id': space_id}).replace(chr(39), chr(39)+chr(39))}')"
     )
 
     row = query(f"SELECT * FROM plans WHERE id = '{plan_id}'")[0]
@@ -147,9 +151,8 @@ def generate_plan(space_id: str, authorization: str = ""):
 
 
 @router.get("/", response_model=list[PlanResponse])
-def list_plans(authorization: str = ""):
+def list_plans(user: dict = Depends(get_current_user)):
     """List all plans for the current user."""
-    user = _get_user(authorization)
     rows = query(f"SELECT * FROM plans WHERE user_id = '{user['id']}' ORDER BY created_at DESC")
     result = []
     for r in rows:
@@ -163,9 +166,8 @@ def list_plans(authorization: str = ""):
 
 
 @router.get("/{plan_id}", response_model=PlanResponse)
-def get_plan(plan_id: str, authorization: str = ""):
+def get_plan(plan_id: str, user: dict = Depends(get_current_user)):
     """Get a specific plan."""
-    user = _get_user(authorization)
     rows = query(f"SELECT * FROM plans WHERE id = '{plan_id}' AND user_id = '{user['id']}'")
     if not rows:
         raise HTTPException(status_code=404, detail="Plan not found")
